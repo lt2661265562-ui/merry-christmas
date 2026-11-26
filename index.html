@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Merry Christmas · DSY</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { display: block; width: 100%; height: 100%; background: #000; }
+  /* 开场前避免白闪 */
+  #stage { opacity: 0; transition: opacity .25s ease-out; }
+  #stage.ready { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+  'use strict';
+
+  // ============================================================
+  //  配置
+  // ============================================================
+  const CFG = {
+    // 构图
+    treeHeight: 0.58,        // 树高 / 屏高
+    treeBottom: 0.87,        // 树底 y / 屏高
+    coneBase: 0.36,          // 底半径 / 树高
+
+    // 结构
+    turns: 9,                // 主螺旋圈数
+    perTurn: 430,            // 每圈点数
+    layers: 3,               // 螺旋层数
+    dustN: 3000,             // 树体噪点
+    tipN: 1250,              // 顶端实体
+    glowN: 2200,             // 地面光晕
+    tipStarN: 300,           // 顶端星群
+    snowN: 170,              // 飘雪
+    bgStarN: 150,            // 背景星
+    sparkN: 280,             // 飞散星辉
+    bandN: 900,              // 每圈彩带点数
+    bands: 3,                // 彩带条数
+    riseN: 2200,             // 开场升起粒子
+
+    // 动态
+    spinSpeed: 1.15,         // 自转角速度（弧度/秒）≈ 66°/s
+    perspective: 0.16,       // 透视强度
+
+    // 开场（秒），总和即开场时长
+    intro: {
+      dark:   0.18,          // 暗场
+      rise:   0.62,          // 粒子升起
+      gather: 0.45,          // 收束成形
+      ignite: 0.32,          // 顶端点亮
+      text:   0.45           // 文字淡入
+    },
+
+    // 配色
+    C: {
+      far:   '#ff8fb8',
+      near:  '#ffd7e6',
+      band:  '#fffafc',
+      star:  '#fff4f9',
+      spark: '#fff6fb',
+      spark2:'#ffc4dd'
+    },
+
+    // 星辉占比
+    rayRatioSpiral: 0.12,
+    rayRatioDust:   0.06,
+    rayRatioTip:    0.15
+  };
+
+  // ============================================================
+  //  基础
+  // ============================================================
+  const cvs = document.getElementById('c');
+  const ctx = cvs.getContext('2d', { alpha: false });
+  const TAU = Math.PI * 2;
+  const rand = Math.random;
+
+  let W = 0, H = 0, DPR = 1;
+  let CX = 0, TOP_Y = 0, BOT_Y = 0, TH = 0;
+
+  let spiral = [], dust = [], glow = [], tipStars = [];
+  let snow = [], bgStars = [], sparks = [], rise = [];
+
+  let T = 0, spin = 0;
+  // 星辉上限随屏幕面积自适应，避免高分屏卡顿
+  let RAY_CAP = 420;
+
+  // 开场状态
+  let phase = 0, phaseT = 0;
+  let treeReveal = 0, heartLit = 0, textReveal = 0;
+
+  const IN = CFG.intro;
+  const INTRO_TOTAL = IN.dark + IN.rise + IN.gather + IN.ignite + IN.text;
+
+  // ============================================================
+  //  尺寸与建模
+  // ============================================================
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+
+    cvs.width  = Math.floor(W * DPR);
+    cvs.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    CX = W / 2;
+    TH = H * CFG.treeHeight;
+    BOT_Y = H * CFG.treeBottom;
+    TOP_Y = BOT_Y - TH;
+
+    // 星辉上限：小屏少画，大屏多画
+    const area = W * H;
+    RAY_CAP = Math.max(120, Math.min(600, Math.round(area / 900)));
+
+    build();
+  }
+
+  // 圆锥在高度比例 t(0底..1顶) 处的半径
+  function coneR(t) {
+    return TH * CFG.coneBase * (1 - t);
+  }
+
+  function build() {
+    spiral.length = 0;
+    dust.length = 0;
+    glow.length = 0;
+    tipStars.length = 0;
+    snow.length = 0;
+    bgStars.length = 0;
+    sparks.length = 0;
+    rise.length = 0;
+
+    // ---------- 主螺旋 ----------
+    const total = CFG.turns * CFG.perTurn;
+    for (let L = 0; L < CFG.layers; L++) {
+      const phaseOff = (L / CFG.layers) * TAU;
+      const rScale = 1 - L * 0.055;
+      for (let k = 0; k < total; k++) {
+        const t = k / total;
+        const R = coneR(t) * rScale;
+        if (R < 0.5) continue;
+        const ang = t * CFG.turns * TAU + phaseOff;
+        // 沿角度轻微起伏，形成层叠"树裙"
+        const wob = 1 + 0.06 * Math.sin(ang * 3);
+        spiral.push({
+          rad: R * wob,
+          ang: ang,
+          y: BOT_Y - t * TH + (rand() - 0.5) * TH * 0.006,
+          r: 0.55 + rand() * 1.0,
+          a: 0.50 + rand() * 0.50,
+          ph: rand() * TAU,
+          sp: 0.5 + rand() * 1.6,
+          ray: rand() < CFG.rayRatioSpiral,
+          rayLen: 0.5 + rand() * 2.0,
+          band: false
+        });
+      }
+    }
+
+    // ---------- 缠绕彩带（让自转可见） ----------
+    for (let b = 0; b < CFG.bands; b++) {
+      const bTurns = 4.5 + b * 0.6;
+      const bPhase = (b / CFG.bands) * TAU;
+      for (let k = 0; k < CFG.bandN; k++) {
+        const t = k / CFG.bandN;
+        const R = coneR(t) * 1.005;
+        if (R < 0.6) continue;
+        spiral.push({
+          rad: R,
+          ang: t * bTurns * TAU + bPhase,
+          y: BOT_Y - t * TH + (rand() - 0.5) * TH * 0.004,
+          r: 1.0 + rand() * 0.9,
+          a: 0.85 + rand() * 0.15,
+          ph: rand() * TAU,
+          sp: 0.4 + rand() * 0.8,
+          ray: true,
+          rayLen: 0.3 + rand() * 0.9,
+          band: true
+        });
+      }
+    }
+
+    // ---------- 树体噪点 ----------
+    for (let i = 0; i < CFG.dustN; i++) {
+      const t = Math.pow(rand(), 0.75);
+      const R = coneR(t);
+      // 偏向边缘，像针叶
+      const rr = R * Math.pow(rand(), 0.35) * 0.98;
+      dust.push({
+        rad: rr,
+        ang: rand() * TAU,
+        y: BOT_Y - t * TH + (rand() - 0.5) * TH * 0.008,
+        r: 0.35 + rand() * 0.7,
+        a: 0.18 + rand() * 0.40,
+        ph: rand() * TAU,
+        sp: 0.6 + rand() * 1.4,
+        ray: rand() < CFG.rayRatioDust,
+        rayLen: 0.4 + rand() * 1.6,
+        band: false
+      });
+    }
+
+    // ---------- 顶端实体 ----------
+    for (let i = 0; i < CFG.tipN; i++) {
+      const t = 0.82 + rand() * 0.18;
+      const R = coneR(t);
+      spiral.push({
+        rad: R * Math.sqrt(rand()),
+        ang: rand() * TAU,
+        y: BOT_Y - t * TH,
+        r: 0.6 + rand() * 1.1,
+        a: 0.55 + rand() * 0.45,
+        ph: rand() * TAU,
+        sp: 0.7 + rand() * 1.8,
+        ray: rand() < CFG.rayRatioTip,
+        rayLen: 0.5 + rand() * 1.8,
+        band: false
+      });
+    }
+
+    // ---------- 地面光晕 ----------
+    for (let i = 0; i < CFG.glowN; i++) {
+      const u = (rand() - 0.5) * 2;
+      const d = Math.pow(rand(), 2.4);
+      glow.push({
+        x: CX + u * TH * 1.05 * Math.sqrt(d),
+        y: BOT_Y + d * TH * 0.06 + (rand() - 0.5) * TH * 0.012,
+        r: 0.4 + rand() * 0.85,
+        a: (0.10 + rand() * 0.30) * (1 - d),
+        ph: rand() * TAU,
+        sp: 0.3 + rand() * 0.9
+      });
+    }
+
+    // ---------- 顶端星群 ----------
+    for (let i = 0; i < CFG.tipStarN; i++) {
+      const ang = rand() * TAU;
+      const rr = Math.pow(rand(), 0.5) * TH * 0.045;
+      tipStars.push({
+        x: CX + Math.cos(ang) * rr,
+        y: TOP_Y + Math.sin(ang) * rr * 0.85,
+        r: 0.5 + rand() * 1.5,
+        a: 0.45 + rand() * 0.55,
+        ph: rand() * TAU,
+        sp: 1.0 + rand() * 2.4
+      });
+    }
+
+    // ---------- 飘雪 ----------
+    for (let i = 0; i < CFG.snowN; i++) {
+      snow.push({
+        x: rand() * W,
+        y: rand() * H,
+        r: 0.4 + rand() * 1.4,
+        a: 0.12 + rand() * 0.50,
+        vy: 0.15 + rand() * 0.55,
+        vx: (rand() - 0.5) * 0.20,
+        ph: rand() * TAU
+      });
+    }
+
+    // ---------- 背景星 ----------
+    for (let i = 0; i < CFG.bgStarN; i++) {
+      bgStars.push({
+        x: rand() * W,
+        y: rand() * H * 0.74,
+        r: 0.3 + rand() * 0.85,
+        a: 0.08 + rand() * 0.40,
+        ph: rand() * TAU
+      });
+    }
+
+    // ---------- 飞散星辉 ----------
+    for (let i = 0; i < CFG.sparkN; i++) {
+      sparks.push(newSpark(true));
+    }
+
+    // ---------- 开场升起粒子 ----------
+    for (let i = 0; i < CFG.riseN; i++) {
+      const t = Math.pow(rand(), 0.7);
+      const R = coneR(t);
+      const tang = rand() * TAU;
+      const trad = R * Math.sqrt(rand());
+      rise.push({
+        sx: rand() * W,
+        sy: H + rand() * H * 0.35,
+        tx: CX + Math.cos(tang) * trad,
+        ty: BOT_Y - t * TH,
+        delay: rand() * 0.22,
+        dur: 0.28 + rand() * 0.28,
+        size: 0.7 + rand() * 1.5,
+        a: 0.5 + rand() * 0.5,
+        hue: rand() < 0.4 ? CFG.C.star : '#ffb9d6'
+      });
+    }
+  }
+
+  function newSpark(aged) {
+    const t = Math.pow(rand(), 0.8);
+    const R = coneR(t);
+    return {
+      t: aged ? rand() * 1.6 : 0,
+      life: 1.6 + rand() * 1.8,
+      y0: BOT_Y - t * TH,
+      ang: rand() * TAU,
+      rad: R * (0.55 + rand() * 0.5),
+      vx: (rand() - 0.5) * 0.9,
+      vy: -(0.25 + rand() * 0.85),
+      size: 0.7 + rand() * 1.5,
+      hue: rand() < 0.35 ? CFG.C.spark : CFG.C.spark2
+    };
+  }
+
+  // ============================================================
+  //  开场推进
+  // ============================================================
+  function stepIntro(dt) {
+    if (phase >= 5) return;
+    phaseT += dt;
+
+    switch (phase) {
+      case 0:
+        if (phaseT >= IN.dark) { phase = 1; phaseT = 0; }
+        break;
+      case 1:
+        if (phaseT >= IN.rise) { phase = 2; phaseT = 0; }
+        break;
+      case 2:
+        treeReveal = Math.min(1, phaseT / IN.gather);
+        if (phaseT >= IN.gather) { phase = 3; phaseT = 0; treeReveal = 1; }
+        break;
+      case 3:
+        heartLit = Math.min(1, phaseT / IN.ignite);
+        if (phaseT >= IN.ignite) { phase = 4; phaseT = 0; heartLit = 1; }
+        break;
+      case 4:
+        textReveal = Math.min(1, phaseT / IN.text);
+        if (phaseT >= IN.text) { phase = 5; phaseT = 0; textReveal = 1; }
+        break;
+    }
+  }
+
+  // ============================================================
+  //  绘制
+  // ============================================================
+  function drawRise() {
+    const p = phase <= 0 ? 0 : (phase === 1 ? phaseT / IN.rise : 1);
+    if (p <= 0) return;
+
+    for (let i = 0; i < rise.length; i++) {
+      const q = rise[i];
+      let k = (p - q.delay) / q.dur;
+      if (k <= 0) continue;
+      if (k > 1) k = 1;
+
+      // 入场缓动：先快后慢
+      const e = 1 - Math.pow(1 - k, 3);
+      const x = q.sx + (q.tx - q.sx) * e;
+      const y = q.sy + (q.ty - q.sy) * e;
+
+      ctx.globalAlpha = Math.min(1, k * 3) * q.a;
+      ctx.fillStyle = q.hue;
+      ctx.beginPath();
+      ctx.arc(x, y, q.size * (1.3 - e * 0.4), 0, TAU);
+      ctx.fill();
+
+      // 拖尾
+      if (k < 0.85) {
+        ctx.globalAlpha *= 0.28;
+        ctx.strokeStyle = q.hue;
+        ctx.lineWidth = q.size * 0.8;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + (q.sx - q.tx) * 0.012, y + (q.sy - q.ty) * 0.012);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawRay(px, py, ca, q, depth) {
+    const len = q.rayLen * TH * 0.055 * (0.6 + depth * 0.7);
+    const ex = px + ca * len;
+    const al = Math.min(1, q.a * 0.55 * depth) * treeReveal;
+    if (al < 0.01) return;
+
+    const g = ctx.createLinearGradient(px, py, ex, py);
+    g.addColorStop(0,   'rgba(255,235,245,' + al.toFixed(3) + ')');
+    g.addColorStop(0.4, 'rgba(255,180,210,' + (al * 0.5).toFixed(3) + ')');
+    g.addColorStop(1,   'rgba(255,140,190,0)');
+    ctx.strokeStyle = g;
+    ctx.lineWidth = q.r * 0.9;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(ex, py);
+    ctx.stroke();
+  }
+
+  function paint() {
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+
+    // ---- 开场阶段 0/1：只画升起粒子 ----
+    if (phase < 2) {
+      drawRise();
+      return;
+    }
+
+    // ---- 背景星 ----
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < bgStars.length; i++) {
+      const s = bgStars[i];
+      ctx.globalAlpha = s.a * (0.45 + 0.55 * Math.sin(T * 0.8 + s.ph));
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, TAU);
+      ctx.fill();
+    }
+
+    // ---- 飘雪 ----
+    for (let i = 0; i < snow.length; i++) {
+      const s = snow[i];
+      ctx.globalAlpha = s.a;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // ---- 顶端爱心 ----
+    if (heartLit > 0.001) {
+      const pulse = 1 + Math.sin(T * 2.4) * 0.08;
+      const hR = TH * 0.11 * pulse * (0.4 + heartLit * 0.6);
+      const g = ctx.createRadialGradient(CX, TOP_Y, 0, CX, TOP_Y, hR);
+      g.addColorStop(0, 'rgba(255,190,215,1)');
+      g.addColorStop(0.35, 'rgba(255,120,170,0.55)');
+      g.addColorStop(1, 'rgba(255,80,140,0)');
+      ctx.globalAlpha = heartLit;
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(CX, TOP_Y, hR, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 地面光晕 ----
+    if (treeReveal > 0.001) {
+      ctx.fillStyle = CFG.C.far;
+      for (let i = 0; i < glow.length; i++) {
+        const q = glow[i];
+        ctx.globalAlpha = q.a * (0.6 + 0.4 * Math.sin(T * q.sp + q.ph)) * treeReveal;
+        ctx.beginPath();
+        ctx.arc(q.x, q.y, q.r, 0, TAU);
+        ctx.fill();
+      }
+    }
+
+    // ---- 树体噪点（批绘） ----
+    if (treeReveal > 0.001) {
+      const near = [], far = [];
+      for (let i = 0; i < dust.length; i++) {
+        const q = dust[i];
+        const a2 = q.ang + spin;
+        const ca = Math.cos(a2), sa = Math.sin(a2);
+        const px = CX + ca * q.rad * (1 + sa * CFG.perspective);
+        const depth = (sa + 1) * 0.5;
+        const al = Math.min(1,
+          q.a * (0.6 + 0.4 * Math.sin(T * q.sp + q.ph)) * (0.5 + depth * 0.6)
+        ) * treeReveal;
+        const rad = q.r * (0.85 + depth * 0.4);
+        (sa > 0 ? near : far).push(px, q.y, rad, al);
+      }
+
+      const sets = [[far, CFG.C.far], [near, CFG.C.near]];
+      for (let s2 = 0; s2 < 2; s2++) {
+        const arr = sets[s2][0];
+        ctx.fillStyle = sets[s2][1];
+        for (let lvl = 0; lvl < 6; lvl++) {
+          const lo = lvl / 6, hi = (lvl + 1) / 6;
+          ctx.beginPath();
+          let any = false;
+          for (let i = 0; i < arr.length; i += 4) {
+            if (arr[i + 3] >= lo && arr[i + 3] < hi) {
+              ctx.moveTo(arr[i] + arr[i + 2], arr[i + 1]);
+              ctx.arc(arr[i], arr[i + 1], arr[i + 2], 0, TAU);
+              any = true;
+            }
+          }
+          if (any) { ctx.globalAlpha = (lo + hi) * 0.5; ctx.fill(); }
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 主螺旋 + 彩带（按颜色分桶批绘，减少状态切换） ----
+    if (treeReveal > 0.001) {
+      // 三个桶：远色 / 近色 / 彩带白
+      const buckets = [[], [], []];
+      const rays = [];
+
+      for (let i = 0; i < spiral.length; i++) {
+        const q = spiral[i];
+        const a2 = q.ang + spin;
+        const ca = Math.cos(a2), sa = Math.sin(a2);
+        const px = CX + ca * q.rad * (1 + sa * CFG.perspective);
+        const depth = (sa + 1) * 0.5;
+
+        const tw = 0.6 + 0.4 * Math.sin(T * q.sp + q.ph);
+        const al = Math.min(1, q.a * tw * (0.5 + depth * 0.8)) * treeReveal;
+        const rad = q.r * (0.85 + depth * 0.55);
+
+        const idx = q.band ? 2 : (sa > 0.15 ? 1 : 0);
+        buckets[idx].push(px, q.y, rad, al);
+
+        if (q.ray && depth > 0.3 && rays.length < RAY_CAP * 7) {
+          rays.push(px, q.y, ca, q.rayLen, q.a, q.r, depth);
+        }
+      }
+
+      // 批绘：同 alpha 段合并（按 0.1 量化分组）
+      const palette = [CFG.C.far, CFG.C.near, CFG.C.band];
+      for (let b = 0; b < 3; b++) {
+        const arr = buckets[b];
+        if (!arr.length) continue;
+        ctx.fillStyle = palette[b];
+        // 量化 alpha 成 6 档，每档一次 fill
+        for (let lvl = 0; lvl < 6; lvl++) {
+          const lo = lvl / 6, hi = (lvl + 1) / 6;
+          ctx.beginPath();
+          let any = false;
+          for (let i = 0; i < arr.length; i += 4) {
+            const al = arr[i + 3];
+            if (al >= lo && al < hi) {
+              ctx.moveTo(arr[i] + arr[i + 2], arr[i + 1]);
+              ctx.arc(arr[i], arr[i + 1], arr[i + 2], 0, TAU);
+              any = true;
+            }
+          }
+          if (any) { ctx.globalAlpha = (lo + hi) * 0.5; ctx.fill(); }
+        }
+      }
+      ctx.globalAlpha = 1;
+
+      // 星辉单独画（数量已限流）
+      for (let i = 0; i < rays.length; i += 7) {
+        drawRay(rays[i], rays[i + 1], rays[i + 2],
+                { rayLen: rays[i + 3], a: rays[i + 4], r: rays[i + 5] },
+                rays[i + 6]);
+      }
+    }
+
+    // ---- 飞散星辉 ----
+    if (treeReveal > 0.001) {
+      for (let i = 0; i < sparks.length; i++) {
+        const s = sparks[i];
+        const k = s.t / s.life;
+        if (k >= 1) continue;
+        const a2 = s.ang + spin;
+        const px = CX + Math.cos(a2) * (s.rad + k * TH * 0.22 + s.vx * s.t * 30);
+        const py = s.y0 + s.vy * s.t * 90 - k * TH * 0.05;
+        const fade = 1 - k;
+        ctx.globalAlpha = Math.min(1, fade * fade * 0.95) * treeReveal;
+        ctx.fillStyle = s.hue;
+        ctx.beginPath();
+        ctx.arc(px, py, s.size * (0.5 + fade * 0.8), 0, TAU);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 顶端星群 ----
+    if (treeReveal > 0.001) {
+      ctx.fillStyle = CFG.C.star;
+      for (let i = 0; i < tipStars.length; i++) {
+        const q = tipStars[i];
+        ctx.globalAlpha = Math.min(1,
+          q.a * (0.5 + 0.5 * Math.sin(T * q.sp + q.ph))
+        ) * treeReveal;
+        ctx.beginPath();
+        ctx.arc(q.x, q.y, q.r, 0, TAU);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 文字 ----
+    if (textReveal > 0.001) {
+      const fs1 = Math.max(15, Math.min(W * 0.058, TH * 0.10));
+      const fs2 = Math.max(17, Math.min(W * 0.070, TH * 0.12));
+      const lx = Math.max(14, CX - TH * CFG.coneBase * 1.75);
+      const ly = TOP_Y + TH * 0.20;
+
+      ctx.save();
+      ctx.globalAlpha = textReveal;
+      ctx.shadowColor = 'rgba(255,150,190,0.95)';
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = '#fff2f8';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+
+      ctx.font = 'italic ' + fs1 + 'px Georgia, "Times New Roman", serif';
+      ctx.fillText('Merry Christmas', lx, ly);
+
+      ctx.font = 'italic ' + fs2 + 'px Georgia, "Times New Roman", serif';
+      ctx.fillText('DSY', lx + 3, ly + fs1 * 1.35);
+
+      ctx.restore();
+    }
+  }
+
+  // ============================================================
+  //  推进
+  // ============================================================
+  function step(dt) {
+    T += dt;
+    stepIntro(dt);
+
+    // 开场第三阶段起开始自转
+    if (phase >= 3) spin += CFG.spinSpeed * dt;
+
+    // 飞散星辉
+    for (let i = 0; i < sparks.length; i++) {
+      const s = sparks[i];
+      s.t += dt;
+      if (s.t >= s.life) sparks[i] = newSpark(false);
+    }
+
+    // 飘雪
+    for (let i = 0; i < snow.length; i++) {
+      const s = snow[i];
+      s.y += s.vy;
+      s.x += s.vx + Math.sin(T * 0.6 + s.ph) * 0.15;
+      if (s.y > H + 4) { s.y = -4; s.x = rand() * W; }
+      if (s.x < -4) s.x = W + 4;
+      if (s.x > W + 4) s.x = -4;
+    }
+  }
+
+  // ============================================================
+  //  主循环：单驱动源，按真实时间推进
+  // ============================================================
+  let running = false;
+  let lastTime = 0;
+  let rafId = null;
+  let timerId = null;
+
+  function advance(dt) {
+    if (dt > 0.1) dt = 0.1;   // 夹紧，避免长时间挂起后跳帧
+    if (dt < 0) dt = 0;
+    step(dt);
+    paint();
+  }
+
+  function rafLoop(now) {
+    if (!lastTime) lastTime = now;
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+    advance(dt);
+    rafId = requestAnimationFrame(rafLoop);
+  }
+
+  function start() {
+    if (running) return;
+    running = true;
+    lastTime = 0;
+    // 先画一帧，避免首帧空白
+    paint();
+    rafId = requestAnimationFrame(rafLoop);
+
+    // 页面隐藏时 RAF 停摆，用定时器按真实时间兜底
+    timerId = setInterval(function () {
+      if (document.hidden) {
+        const now = performance.now();
+        const dt = (now - lastTime) / 1000;
+        lastTime = now;
+        advance(dt);
+      }
+    }, 100);
+  }
+
+  // ============================================================
+  //  事件
+  // ============================================================
+  let rzT = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(rzT);
+    rzT = setTimeout(function () { resize(); paint(); }, 150);
+  });
+
+  // 点击/触摸重播开场
+  function replay() {
+    phase = 0; phaseT = 0;
+    treeReveal = 0; heartLit = 0; textReveal = 0;
+    spin = 0; T = 0;
+    build();
+    paint();
+  }
+  cvs.addEventListener('click', replay);
+
+  // ============================================================
+  //  启动
+  // ============================================================
+  resize();
+  start();
+
+  // 调试接口
+  window.__tree = {
+    state: function () {
+      return {
+        phase: phase,
+        introT: +phaseT.toFixed(2),
+        treeReveal: +treeReveal.toFixed(2),
+        heartLit: +heartLit.toFixed(2),
+        textReveal: +textReveal.toFixed(2),
+        spin: +spin.toFixed(2),
+        T: +T.toFixed(2),
+        counts: {
+          spiral: spiral.length,
+          dust: dust.length,
+          glow: glow.length,
+          sparks: sparks.length,
+          total: spiral.length + dust.length + glow.length + tipStars.length
+        }
+      };
+    },
+    replay: replay,
+    cfg: CFG,
+    introTotal: INTRO_TOTAL
+  };
+})();
+</script>
+</body>
+</html>
